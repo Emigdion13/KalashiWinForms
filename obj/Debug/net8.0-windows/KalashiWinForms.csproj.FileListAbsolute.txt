@@ -1,0 +1,17 @@
+c:\Users\juan_\OneDrive\Desktop\projects\KalashiWinForms\obj\Debug\net8.0-windows\KalashiWinForms.csproj.AssemblyReference.cache
+c:\Users\juan_\OneDrive\Desktop\projects\KalashiWinForms\obj\Debug\net8.0-windows\KalashiWinForms.GeneratedMSBuildEditorConfig.editorconfig
+c:\Users\juan_\OneDrive\Desktop\projects\KalashiWinForms\obj\Debug\net8.0-windows\KalashiWinForms.AssemblyInfoInputs.cache
+c:\Users\juan_\OneDrive\Desktop\projects\KalashiWinForms\obj\Debug\net8.0-windows\KalashiWinForms.AssemblyInfo.cs
+c:\Users\juan_\OneDrive\Desktop\projects\KalashiWinForms\obj\Debug\net8.0-windows\KalashiWinForms.csproj.CoreCompileInputs.cache
+c:\Users\juan_\OneDrive\Desktop\projects\KalashiWinForms\bin\Debug\net8.0-windows\KalashiWinForms.exe
+c:\Users\juan_\OneDrive\Desktop\projects\KalashiWinForms\bin\Debug\net8.0-windows\KalashiWinForms.deps.json
+c:\Users\juan_\OneDrive\Desktop\projects\KalashiWinForms\bin\Debug\net8.0-windows\KalashiWinForms.runtimeconfig.json
+c:\Users\juan_\OneDrive\Desktop\projects\KalashiWinForms\bin\Debug\net8.0-windows\KalashiWinForms.dll
+c:\Users\juan_\OneDrive\Desktop\projects\KalashiWinForms\bin\Debug\net8.0-windows\KalashiWinForms.pdb
+c:\Users\juan_\OneDrive\Desktop\projects\KalashiWinForms\bin\Debug\net8.0-windows\Newtonsoft.Json.dll
+c:\Users\juan_\OneDrive\Desktop\projects\KalashiWinForms\obj\Debug\net8.0-windows\KalashiW.4ABF086B.Up2Date
+c:\Users\juan_\OneDrive\Desktop\projects\KalashiWinForms\obj\Debug\net8.0-windows\KalashiWinForms.dll
+c:\Users\juan_\OneDrive\Desktop\projects\KalashiWinForms\obj\Debug\net8.0-windows\refint\KalashiWinForms.dll
+c:\Users\juan_\OneDrive\Desktop\projects\KalashiWinForms\obj\Debug\net8.0-windows\KalashiWinForms.pdb
+c:\Users\juan_\OneDrive\Desktop\projects\KalashiWinForms\obj\Debug\net8.0-windows\KalashiWinForms.genruntimeconfig.cache
+c:\Users\juan_\OneDrive\Desktop\projects\KalashiWinForms\obj\Debug\net8.0-windows\ref\KalashiWinForms.dll
