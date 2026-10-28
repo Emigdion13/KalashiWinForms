@@ -638,7 +638,25 @@ public partial class MainForm : Form
         catch { }
     }
 
+    private string? _lastTickError;
+
+    // async void timer handler: an exception escaping here kills the whole app, so catch and log
     private async void UpdateTimersOnly()
+    {
+        try
+        {
+            await UpdateTimersCoreAsync();
+        }
+        catch (Exception ex)
+        {
+            var err = $"{ex.GetType().Name}: {ex.Message}";
+            if (err != _lastTickError) // same error every second would flood the log
+                Log($"Timer tick error: {err}");
+            _lastTickError = err;
+        }
+    }
+
+    private async Task UpdateTimersCoreAsync()
     {
         _tickCounter++;
         var now = DateTime.UtcNow;
@@ -844,7 +862,7 @@ public partial class MainForm : Form
 
             // Store ticker→coin and close times for WebSocket + timer
             var newTickersForWs = new List<string>();
-            _coinCloseTimes.Clear();
+            // Don't Clear(): a coin whose fetch failed this round keeps its last known close time
             foreach (var r in rows)
             {
                 if (r!.Ticker != "?")

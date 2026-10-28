@@ -69,14 +69,23 @@ public static class LineMath
             return snap;
         }
 
-        var tte = closeUtc == DateTime.MinValue ? 0 : (closeUtc - utcNow).TotalSeconds;
+        // Unknown close = no window yet. Treating it as tte 0 used to hit the "closed"
+        // branch and crash on DateTime.MinValue.AddSeconds(-60).
+        var closeKnown = closeUtc != DateTime.MinValue;
+        var tte = closeKnown ? (closeUtc - utcNow).TotalSeconds : double.PositiveInfinity;
         snap.Tte = tte;
         snap.LastDist = last - strike;
         snap.LastBps = snap.LastDist / strike * 10_000.0;
         snap.LastSide = snap.LastDist >= 0 ? "YES" : "NO";
 
         double expected;
-        if (tte > 60)
+        if (!closeKnown)
+        {
+            expected = last;
+            snap.InWindow = false;
+            snap.Src = "last print — close time unknown";
+        }
+        else if (tte > 60)
         {
             expected = last;
             snap.InWindow = false;
