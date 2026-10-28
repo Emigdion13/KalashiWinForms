@@ -33,7 +33,7 @@ public class KalshiRestClient
             url += "?" + qs;
         }
 
-        var request = new HttpRequestMessage(new HttpMethod(method), url);
+        using var request = new HttpRequestMessage(new HttpMethod(method), url);
 
         if (_auth != null)
         {
@@ -49,38 +49,78 @@ public class KalshiRestClient
             request.Content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
         }
 
-        var response = await _http.SendAsync(request);
-        response.EnsureSuccessStatusCode();
-        var content = await response.Content.ReadAsStringAsync();
+        // ConfigureAwait(false): JSON parsing runs on the thread pool, not the UI thread.
+        // Callers still resume on the UI thread because they await with their own context.
+        using var response = await _http.SendAsync(request).ConfigureAwait(false);
+        var content = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode)
+        {
+            var detail = content.Length > 300 ? content[..300] + "…" : content;
+            throw new HttpRequestException(
+                $"{(int)response.StatusCode} {response.ReasonPhrase}: {detail}", null, response.StatusCode);
+        }
         return JObject.Parse(content);
     }
 
     // ── Markets ──
 
-    public async Task<JObject> GetMarketsAsync(string? status = null, string? seriesTicker = null, int limit = 100)
+    public Task<JObject> GetMarketsAsync(string? status = null, string? seriesTicker = null, int limit = 100)
     {
         var p = new Dictionary<string, string> { ["limit"] = Math.Min(limit, 500).ToString() };
         if (status != null) p["status"] = status;
         if (seriesTicker != null) p["series_ticker"] = seriesTicker;
-        return await RequestAsync("GET", "/markets", p);
+        return RequestAsync("GET", "/markets", p);
     }
 
-    public async Task<JObject> GetMarketAsync(string ticker) =>
-        await RequestAsync("GET", $"/markets/{ticker}");
+    public Task<JObject> GetMarketAsync(string ticker) =>
+        RequestAsync("GET", $"/markets/{ticker}");
 
     // ── Live Data (spot prices) ──
 
-    public async Task<JObject> GetEventLiveDataAsync(string eventTicker, string? range = null)
+    public Task<JObject> GetEventLiveDataAsync(string eventTicker, string? range = null)
     {
         var p = new Dictionary<string, string>();
         if (range != null) p["range"] = range;
-        return await RequestAsync("GET", $"/live_data/events/{eventTicker}", p);
+        return RequestAsync("GET", $"/live_data/events/{eventTicker}", p);
+    }
+
+    // Ranges the API rejected (400/422) — skip them on later calls instead of paying a failed request each time
+    private readonly HashSet<string> _badRanges = new();
+
+    /// <summary>
+    /// Returns last CF print + the 1-second timeseries
+    /// (this is the same family Kalshi averages for settlement).
+    /// recentOnly = live polling: the 15min range is ~4x smaller than 1h.
+    /// </summary>
+    public async Task<(double spot, List<(long ms, double v)> points)> GetLiveSeriesAsync(string eventTicker, bool recentOnly = false)
+    {
+        var ranges = recentOnly ? new[] { "15min", "1h" } : new[] { "1h", "15min", "1d" };
+        Exception? last = null;
+        foreach (var rng in ranges)
+        {
+            lock (_badRanges)
+                if (_badRanges.Contains(rng)) continue;
+            try
+            {
+                var data = await GetEventLiveDataAsync(eventTicker, rng).ConfigureAwait(false);
+                return LineMath.ParseLive(data);
+            }
+            catch (HttpRequestException ex) when (ex.StatusCode is System.Net.HttpStatusCode.BadRequest
+                                                  or System.Net.HttpStatusCode.UnprocessableEntity)
+            {
+                lock (_badRanges) _badRanges.Add(rng);
+                last = ex;
+            }
+            catch (Exception ex) { last = ex; }
+        }
+        if (last != null) throw last;
+        return (0, new List<(long, double)>());
     }
 
     // ── Portfolio ──
 
-    public async Task<JObject> GetBalanceAsync() =>
-        await RequestAsync("GET", "/portfolio/balance");
+    public Task<JObject> GetBalanceAsync() =>
+        RequestAsync("GET", "/portfolio/balance");
 
     public async Task<JArray> GetPositionsAsync()
     {

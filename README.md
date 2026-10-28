@@ -1,14 +1,61 @@
-# 🏛️ KalashiWinForms — 15-Min Crypto Trading
+# KalashiWinForms — 15-Min Crypto Trading
 
-Windows Forms desktop app for trading Kalshi 15-minute crypto markets with real-time WebSocket data.
+Windows Forms desktop app for Kalshi 15-minute crypto markets.
+
+**This build fixes the middle line** and adds a **same-side / YES-NO pattern lab** so you can see what actually finishes, not just last tick.
+
+## What was wrong with Δ Spot
+
+Kalshi 15m crypto does **not** settle on the last tick.
+
+From the live contract rules:
+
+> If the **simple average of the sixty seconds** of CF Benchmarks' BRTI **before the close** is at least the **simple average of the sixty seconds** of BRTI **before the open**, the market resolves **Yes**.
+
+That open average **is** `floor_strike`. That is the **middle line**.
+
+The old grid printed `last_tick − floor_strike` with 9 decimals. Two bugs:
+
+1. **Last tick is not the pin.** In the last minute a wick through the line does not flip the contract unless it moves the 60-second average.
+2. **BNB / ADA / NEAR / TON / BCH / ZEC / HYPE** asked Kalshi `live_data` for `current_price` / `value` / `spot`. Those fields are not there. The real print is `live_data.details.timeseries[]` `{t, v}`. Those coins were blank or junk.
+
+## What you see now (Markets tab)
+
+| Column | Meaning |
+| --- | --- |
+| **Δ LINE** | Expected **settlement average − floor_strike**. This is the real distance from the middle line. |
+| **Δ last** | Last tick − strike (the old number). Turns amber when it **disagrees** with Δ LINE. |
+| **bps** | Δ LINE in basis points. Compare coins on the same scale. |
+| **SIDE** | YES if the settle-avg is above the line, NO if below. |
+| **vs BTC** | WITH = same side of its own line as BTC. VS = opposite. |
+
+Before the last 60s, last tick ≈ settle avg, so Δ LINE and Δ last match. In the last minute they can split — **trust Δ LINE**.
+
+## LINE / PATTERNS tab
+
+On first launch the app pulls the last ~20 **official settled** windows per coin (so you are not waiting all night) and rebuilds T-5m / T-2m / T-60s marks from Kalshi's historical 1s series.
+
+- **LIVE** — how many coins are YES vs NO right now, and who is WITH / AGAINST BTC.
+- **SAME SIDE** — for each pair, how often they finished on the same side of their own line. `n` is finished windows. Need **12** before you treat a % as real.
+- **WHAT FINISHES YES / NO** — persistence (already on a side at T-5m / T-2m / T-60s), tape+line agreement, “when last tick disagrees the average wins”, same-as-BTC base rate, last-second crosses.
+- **RECENT SETTLES** — official Kalshi `result` per window.
+
+This is a lab, not a 98% costume. A rule with `n<12` is a story. Size like family-medicine money.
+
+Files written next to your `.env` (or the exe):
+
+- `coin_finishes.jsonl` — every settled window
+- `coin_patterns.json` — last snapshot
 
 ## Setup
 
 ### 1. Prerequisites
+
 - [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0) or later
 - A Kalshi account with API access (production recommended)
 
 ### 2. API Keys
+
 Create a `.env` file in the project root:
 
 ```env
@@ -17,87 +64,32 @@ KALSHI_KEY_ID=your-kalshi-key-id
 KALSHI_PRIVATE_KEY_PATH=~/.key/kalshi/key.pem
 ```
 
-
-C:\Users\juan_\.key\kalshi\key.pem
-
-`~` expands to your Windows user folder (`C:\Users\<you>\`). The `.pem` file is your RSA private key downloaded from the Kalshi dashboard.
+`~` expands to your Windows user folder (`C:\Users\<you>\`). The `.pem` file is your RSA private key from the Kalshi dashboard. Never paste the PEM into chat.
 
 ### 3. Build & Run
-```bash
+
+```bat
+cd C:\Users\juan_\OneDrive\Desktop\projects\KalashiWinForms
 dotnet build
 dotnet run
 ```
+
+Overwrite the old `.cs` files with this folder, keep your existing `.env`.
 
 ## Architecture
 
 | File | Purpose |
 |---|---|
-| `Program.cs` | Entry point, launches the form |
-| `MainForm.cs` | All UI: grid, trading panel, timers, WebSocket wiring |
-| `KalshiRestClient.cs` | REST API client (markets, orders, balance, positions, live data) |
-| `KalshiWebSocketClient.cs` | WebSocket client (ticker subscriptions, CF Benchmarks spot prices) |
-| `KalshiAuth.cs` | RSA-PSS signing for API authentication |
-| `KalshiConfig.cs` | Reads `.env`, provides REST/WS URLs for demo vs production |
+| `Program.cs` | Entry point |
+| `MainForm.cs` | Grid, trading panel, timers, WebSocket |
+| `MainForm.Patterns.cs` | LINE columns, live marks, backfill, pattern tab |
+| `LineMath.cs` | 60s-average distance from `floor_strike` |
+| `CoinPatternLab.cs` | Same-side matrix + YES/NO rules, persisted |
+| `KalshiRestClient.cs` | REST (markets, orders, balance, live_data timeseries) |
+| `KalshiWebSocketClient.cs` | Ticker + CF Benchmarks spots |
+| `KalshiAuth.cs` | RSA-PSS signing |
+| `KalshiConfig.cs` | `.env` |
 
-## Data Sources
+## Coin order
 
-| Data | Source | Update Rate |
-|---|---|---|
-| Market prices (UP%, DOWN%, Volume) | Kalshi WebSocket `ticker` channel | Real-time push |
-| Spot prices (BTC, ETH, SOL, DOGE, XRP) | CF Benchmarks via Kalshi WebSocket | Real-time push |
-| Spot prices (BNB, ADA, NEAR, TON, BCH, ZEC, HYPE) | Kalshi REST `/live_data/events/{ticker}` | Every 5s |
-| Balance | Kalshi REST `/portfolio/balance` | On manual refresh |
-| Orders | Kalshi REST `/portfolio/orders` | On manual refresh |
-| Countdown timer | Computed locally from `close_time` | Every 1s |
-| Orderbook pressure | Computed from REST bid/ask sizes | Every 30s |
-
-## Features
-
-### Market Grid
-- **Columns**: Ticker, Coin, UP%, DOWN%, Δ Spot (spot − strike), Volume
-- **Coloring**:
-  - ≥90% UP → full row green
-  - 80–89.99% UP → UP% cell + Coin cell green
-  - 10.01–20% UP → DOWN% cell + Coin cell red
-  - ≤10% UP → full row red
-  - Coin cell also tints based on orderbook pressure (bid size imbalance)
-- **Single click** on a row → sets the trading coin combo box
-- **Click UP% column** → sets radio to 📈 UP
-- **Click DOWN% column** → sets radio to 📉 DOWN
-- **Selection auto-clears** on empty clicks
-
-### Top Bar
-- Balance / Available
-- ⏱ Countdown to next market close (adjusted −6s for server lag)
-- Current UTC time
-- Refresh button (reloads all REST data)
-
-### Trading Panel (bottom)
-- **Coin** dropdown
-- **📈 UP / 📉 DOWN** radio
-- **Amount ($)** — dollar amount for buy orders
-- **Limit (¢)** — optional limit price in cents
-- **Profit %** — auto-calculates sell price from entry cost basis
-- **MKT** checkbox — enables market sell (ignores limit/profit)
-- **🟢 BUY** / **🔴 SELL** buttons
-
-### Logs
-- **📜 Logs tab** — full error and event log with timestamps
-- **Bottom strip** — shows most recent log entry
-
-## Tabs
-1. **📊 Markets** — live market data grid
-2. **📋 Orders & Portfolio** — your open orders
-3. **📜 Logs** — error and event log (500 entries, scrollable)
-
-## WebSocket Flow
-1. Connect to `wss://external-api-ws.kalshi.com/trade-api/ws/v2`
-2. Authenticate via RSA-signed headers
-3. Subscribe to `ticker` channel for all 12 coin markets
-4. Subscribe to `cfbenchmarks_value` for 5 major spot prices
-5. Receive real-time updates, update grid cells in-place (no flicker)
-6. Auto-reconnect on disconnect with 5s delay
-7. Every 30s: check for new markets (15-min rollover), add to subscription
-
-## Coin Order (fixed)
 BTC → ETH → SOL → BNB → XRP → NEAR → ZEC → TON → BCH → ADA → DOGE → HYPE

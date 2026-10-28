@@ -1,9 +1,10 @@
 using Newtonsoft.Json.Linq;
 using System.Data;
+using System.Reflection;
 
 namespace KalashiWinForms;
 
-public class MainForm : Form
+public partial class MainForm : Form
 {
     private readonly KalshiRestClient _rest;
     private readonly KalshiConfig _config;
@@ -21,6 +22,8 @@ public class MainForm : Form
     private DataGridView _positionsGrid = null!;
     private TabControl _tabControl = null!;
     private bool _isRefreshing;
+    private bool _wsFallback;   // WS down → poll REST from the 1s timer and retry WS
+    private bool _wsConnecting;
     private int _tickCounter;
     private readonly List<string> _log = new();
     private TextBox _txtLog = null!;
@@ -40,8 +43,6 @@ public class MainForm : Form
         ["BRTI"] = "BTC", ["ETHUSD_RTI"] = "ETH", ["SOLUSD_RTI"] = "SOL",
         ["DOGEUSD_RTI"] = "DOGE", ["XRPUSD_RTI"] = "XRP"
     };
-    private readonly HttpClient _spotHttp = new() { Timeout = TimeSpan.FromSeconds(5) };
-
     // CryptoCompare symbols for coins not covered by CF Benchmarks
     private static readonly string[] MissingFromCf = { "BNB", "ADA", "NEAR", "TON", "BCH", "ZEC", "HYPE" };
 
@@ -62,23 +63,32 @@ public class MainForm : Form
         // Fallback: look in this project folder
         if (!File.Exists(envPath))
         {
-            envPath = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                "OneDrive", "Desktop", "projects", "KalashiWinForms", ".env");
+            var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            foreach (var dir in new[]
+            {
+                Directory.GetCurrentDirectory(),
+                Path.Combine(home, "OneDrive", "Desktop", "KalashiWinForms"),
+                Path.Combine(home, "OneDrive", "Desktop", "projects", "KalashiWinForms"),
+            })
+            {
+                var cand = Path.Combine(dir, ".env");
+                if (File.Exists(cand)) { envPath = cand; break; }
+            }
         }
 
         _config = KalshiConfig.FromEnvFile(envPath);
         _rest = new KalshiRestClient(_config);
         _rest.DebugLog = msg => Log(msg);
 
+        InitPatterns();
         InitializeComponent();
         _ = InitializeAsync();
     }
 
     private void InitializeComponent()
     {
-        Text = "🏛️ Kalashi — 15-Min Crypto Trading";
-        Size = new Size(1100, 750);
+        Text = "Kalashi — 15m + LINE lab";
+        Size = new Size(1280, 820);
         StartPosition = FormStartPosition.CenterScreen;
         Font = new Font("Segoe UI", 10);
 
@@ -179,13 +189,19 @@ public class MainForm : Form
             RowTemplate = { Height = 28 }
         };
 
+        var right = new DataGridViewCellStyle { Alignment = DataGridViewContentAlignment.MiddleRight };
+        var center = new DataGridViewCellStyle { Alignment = DataGridViewContentAlignment.MiddleCenter };
         _grid.Columns.AddRange(
-            new DataGridViewTextBoxColumn { Name = "Ticker", HeaderText = "Ticker", FillWeight = 30 },
-            new DataGridViewTextBoxColumn { Name = "UP%", HeaderText = "UP%", FillWeight = 10, DefaultCellStyle = new DataGridViewCellStyle { ForeColor = Color.LimeGreen, Alignment = DataGridViewContentAlignment.MiddleCenter } },
-            new DataGridViewTextBoxColumn { Name = "Coin", HeaderText = "Coin", FillWeight = 8, DefaultCellStyle = new DataGridViewCellStyle { Font = new Font("Consolas", 11, FontStyle.Bold), Alignment = DataGridViewContentAlignment.MiddleRight } },
-            new DataGridViewTextBoxColumn { Name = "DOWN%", HeaderText = "DOWN%", FillWeight = 10, DefaultCellStyle = new DataGridViewCellStyle { ForeColor = Color.Tomato, Alignment = DataGridViewContentAlignment.MiddleCenter } },
-            new DataGridViewTextBoxColumn { Name = "ΔSpot", HeaderText = "Δ Spot", FillWeight = 18, DefaultCellStyle = new DataGridViewCellStyle { Alignment = DataGridViewContentAlignment.MiddleRight } },
-            new DataGridViewTextBoxColumn { Name = "Volume", HeaderText = "Volume", FillWeight = 10, DefaultCellStyle = new DataGridViewCellStyle { Alignment = DataGridViewContentAlignment.MiddleRight } }
+            new DataGridViewTextBoxColumn { Name = "Ticker", HeaderText = "Ticker", FillWeight = 22 },
+            new DataGridViewTextBoxColumn { Name = "UP%", HeaderText = "UP%", FillWeight = 8, DefaultCellStyle = new DataGridViewCellStyle { ForeColor = Color.LimeGreen, Alignment = DataGridViewContentAlignment.MiddleCenter } },
+            new DataGridViewTextBoxColumn { Name = "Coin", HeaderText = "Coin", FillWeight = 7, DefaultCellStyle = new DataGridViewCellStyle { Font = new Font("Consolas", 11, FontStyle.Bold), Alignment = DataGridViewContentAlignment.MiddleRight } },
+            new DataGridViewTextBoxColumn { Name = "DOWN%", HeaderText = "DOWN%", FillWeight = 8, DefaultCellStyle = new DataGridViewCellStyle { ForeColor = Color.Tomato, Alignment = DataGridViewContentAlignment.MiddleCenter } },
+            new DataGridViewTextBoxColumn { Name = "LineDelta", HeaderText = "Δ LINE", FillWeight = 14, DefaultCellStyle = right },
+            new DataGridViewTextBoxColumn { Name = "LastDelta", HeaderText = "Δ last", FillWeight = 12, DefaultCellStyle = right },
+            new DataGridViewTextBoxColumn { Name = "Bps", HeaderText = "bps", FillWeight = 7, DefaultCellStyle = right },
+            new DataGridViewTextBoxColumn { Name = "LineSide", HeaderText = "SIDE", FillWeight = 7, DefaultCellStyle = center },
+            new DataGridViewTextBoxColumn { Name = "VsBtc", HeaderText = "vs BTC", FillWeight = 8, DefaultCellStyle = center },
+            new DataGridViewTextBoxColumn { Name = "Volume", HeaderText = "Volume", FillWeight = 8, DefaultCellStyle = right }
         );
 
         marketsTab.Controls.Add(_grid);
@@ -259,11 +275,20 @@ public class MainForm : Form
             Font = new Font("Consolas", 9),
             WordWrap = false
         };
+        // Lines logged before the textbox existed (e.g. LINE lab init)
+        if (_log.Count > 0)
+            _txtLogFull.Text = string.Join(Environment.NewLine, _log) + Environment.NewLine;
         logsTab.Controls.Add(_txtLogFull);
+
+        EnableDoubleBuffering(_grid);
+        EnableDoubleBuffering(_positionsGrid);
+        EnableDoubleBuffering(_ordersGrid);
 
         _tabControl.TabPages.Add(marketsTab);
         _tabControl.TabPages.Add(ordersTab);
         _tabControl.TabPages.Add(logsTab);
+        try { BuildPatternsUi(); }
+        catch (Exception ex) { Log($"LINE tab failed to build: {ex.Message}"); }
 
         // ── Bottom trading panel ──
         var bottomPanel = new Panel
@@ -458,6 +483,7 @@ public class MainForm : Form
         FormClosing += async (_, _) =>
         {
             _refreshTimer.Stop();
+            try { _lab.SaveSummary(); } catch { }
             if (_wsClient != null)
                 await _wsClient.DisconnectAsync();
             _wsClient?.Dispose();
@@ -466,17 +492,42 @@ public class MainForm : Form
 
     private void Log(string msg)
     {
-        var ts = $"{DateTime.UtcNow:HH:mm:ss}";
-        _log.Add($"[{ts}] {msg}");
-        if (_log.Count > 500) _log.RemoveAt(0);
+        var line = $"[{DateTime.UtcNow:HH:mm:ss}] {msg}";
+        _log.Add(line);
+        var trimmed = false;
+        if (_log.Count > 500)
+        {
+            // Trim in chunks so the full textbox is only rebuilt once per 100 lines
+            _log.RemoveRange(0, _log.Count - 400);
+            trimmed = true;
+        }
         if (_txtLog != null)
-            _txtLog.Text = _log.LastOrDefault() ?? "";
+            _txtLog.Text = line;
         if (_txtLogFull != null)
         {
-            _txtLogFull.Text = string.Join(Environment.NewLine, _log);
-            _txtLogFull.SelectionStart = _txtLogFull.Text.Length;
-            _txtLogFull.ScrollToCaret();
+            if (trimmed)
+            {
+                _txtLogFull.Text = string.Join(Environment.NewLine, _log) + Environment.NewLine;
+                _txtLogFull.SelectionStart = _txtLogFull.TextLength;
+                _txtLogFull.ScrollToCaret();
+            }
+            else
+            {
+                _txtLogFull.AppendText(line + Environment.NewLine);
+            }
         }
+    }
+
+    private static void EnableDoubleBuffering(DataGridView grid) =>
+        typeof(DataGridView)
+            .GetProperty("DoubleBuffered", BindingFlags.Instance | BindingFlags.NonPublic)
+            ?.SetValue(grid, true);
+
+    // Writing an unchanged value still repaints the cell — skip those
+    private static void SetCell(DataGridViewCell cell, object? value)
+    {
+        if (!Equals(cell.Value, value))
+            cell.Value = value;
     }
 
     // ── Init ──
@@ -489,40 +540,56 @@ public class MainForm : Form
 
     private async Task StartWebSocketAsync()
     {
+        if (_wsConnecting) return;
+        _wsConnecting = true;
         try
         {
-            var tickers = _tickerToCoin.Keys.ToList();
-            if (tickers.Count == 0) return;
+            // Only the current window's tickers — _tickerToCoin also holds every expired one
+            var tickers = _coinTickers.Values.Where(t => !string.IsNullOrEmpty(t)).Distinct().ToList();
+            if (tickers.Count == 0)
+            {
+                _wsFallback = true;
+                return;
+            }
 
-            _wsClient = new KalshiWebSocketClient(_config);
-            _wsClient.TickerUpdated += HandleTickerUpdate;
-            _wsClient.SpotUpdated += (key, price) =>
+            // Drop the old client; its late events are ignored by the ws != _wsClient checks
+            _wsClient?.Dispose();
+            var ws = new KalshiWebSocketClient(_config);
+            _wsClient = ws;
+            ws.TickerUpdated += msg => { if (ws == _wsClient) HandleTickerUpdate(msg); };
+            ws.SpotUpdated += (key, price) =>
             {
+                if (ws != _wsClient) return;
                 if (SpotToCoin.TryGetValue(key, out var coin))
+                {
                     _spotPrices[coin] = price;
+                    AppendSpot(coin, DateTime.UtcNow, price);
+                }
             };
-            _wsClient.LogMessage += msg =>
+            ws.LogMessage += msg =>
             {
+                if (ws != _wsClient) return;
                 _lblStatus.Text = msg;
                 if (msg.Contains("Error") || msg.Contains("error"))
                     Log(msg);
             };
-            _wsClient.ConnectionLost += async ex =>
+            ws.ConnectionLost += _ =>
             {
-                _lblStatus.Text = $"🔌 WS disconnected, reconnecting in 5s...";
-                await Task.Delay(5000);
-                _ = StartWebSocketAsync();
+                if (ws != _wsClient) return;
+                _wsFallback = true;
+                _lblStatus.Text = "🔌 WS disconnected — REST fallback, reconnecting...";
             };
 
-            await _wsClient.ConnectAsync(tickers);
+            await ws.ConnectAsync(tickers);
+            _wsFallback = false;
             _lblStatus.Text = $"⚡ WebSocket live — {tickers.Count} tickers";
         }
         catch (Exception ex)
         {
+            _wsFallback = true;
             _lblStatus.Text = $"WS: {ex.Message} (REST fallback active)";
-            // Fall back to REST polling
-            _refreshTimer.Tick += async (_, _) => await RefreshMarketsWsFallbackAsync();
         }
+        finally { _wsConnecting = false; }
     }
 
     private void HandleTickerUpdate(JObject msg)
@@ -548,16 +615,21 @@ public class MainForm : Form
             // Store live price for P&L calculation
             var priceDollars = m["price_dollars"]?.Value<double>();
             if (priceDollars.HasValue)
+            {
                 _livePrices[ticker] = priceDollars.Value;
+                _coinYesMid[coin] = priceDollars.Value;
+            }
+            else if (double.TryParse(upPct.TrimEnd('%'), out var upV))
+                _coinYesMid[coin] = upV / 100.0;
 
             // Update grid in-place — find row by coin name
             foreach (DataGridViewRow row in _grid.Rows)
             {
                 if (row.Cells["Coin"].Value?.ToString() == coin)
                 {
-                    row.Cells["UP%"].Value = upPct;
-                    row.Cells["DOWN%"].Value = downPct;
-                    row.Cells["Volume"].Value = volume;
+                    SetCell(row.Cells["UP%"], upPct);
+                    SetCell(row.Cells["DOWN%"], downPct);
+                    SetCell(row.Cells["Volume"], volume);
                     ApplyRowColor(row, upPct);
                     break;
                 }
@@ -570,6 +642,7 @@ public class MainForm : Form
     {
         _tickCounter++;
         var now = DateTime.UtcNow;
+        InvalidateLines(); // time moved — recompute each coin's LINE once for this tick
 
         // Update UTC time label
         _lblUtc.Text = $"{now:HH:mm:ss} UTC";
@@ -591,16 +664,36 @@ public class MainForm : Form
         }
         _lblTimer.Text = $"⏱ {timerText}";
 
-        // Update spot distance for all rows
-        foreach (DataGridViewRow row in _grid.Rows)
+        // Grid cells only matter while the Markets tab is on screen
+        if (_tabControl.SelectedIndex == 0)
         {
-            var coin = row.Cells["Coin"].Value?.ToString();
-            if (coin != null)
-                row.Cells["ΔSpot"].Value = FormatSpotDist(coin);
+            // Update line distance for all rows (settle-avg, not last tick)
+            foreach (DataGridViewRow row in _grid.Rows)
+            {
+                var coin = row.Cells["Coin"].Value?.ToString();
+                if (coin == null) continue;
+                SetCell(row.Cells["LineDelta"], FormatSpotDist(coin));
+                SetCell(row.Cells["LastDelta"], FormatLastDist(coin));
+                SetCell(row.Cells["Bps"], FormatBps(coin));
+                SetCell(row.Cells["LineSide"], FormatSide(coin));
+                SetCell(row.Cells["VsBtc"], FormatVsBtc(coin));
+                ColorLineCells(row, coin);
+            }
+
+            // Live P&L in positions grid
+            RenderPositionsGrid();
         }
 
-        // Live P&L in positions grid
-        RenderPositionsGrid();
+        TickLineLab();
+
+        // WS down: poll markets over REST every 3s and retry the socket every 10s
+        if (_wsFallback)
+        {
+            if (_tickCounter % 3 == 0)
+                _ = RefreshMarketsAsync();
+            if (_tickCounter % 10 == 0)
+                _ = StartWebSocketAsync();
+        }
 
         // Every 30 seconds, check for new markets and refresh balance + orders + positions
         if (_tickCounter % 30 == 0)
@@ -609,36 +702,21 @@ public class MainForm : Form
             _ = RefreshBalanceAsync();
             _ = RefreshOrdersAsync();
             _ = RefreshPositionsGridAsync();
+            _ = ConfirmOfficialAsync();
         }
 
-        // Every 5 seconds, fetch spot prices for coins not covered by CF Benchmarks
-        if (_tickCounter % 5 == 0)
+        // Every 5 seconds, fetch Kalshi live_data timeseries (the real CF path).
+        // Offset from the 30s batch so the two request bursts don't land in the same second.
+        if (_tickCounter % 5 == 2)
             _ = FetchSpotPricesAsync();
     }
 
     private async Task FetchSpotPricesAsync()
     {
-        // Use Kalshi's own live data endpoint for the coins CF Benchmarks doesn't cover
-        var missing = new[] { "BNB", "ADA", "NEAR", "TON", "BCH", "ZEC", "HYPE" };
-        foreach (var coin in missing)
-        {
-            if (!_coinEventTickers.TryGetValue(coin, out var evt) || string.IsNullOrEmpty(evt))
-                continue;
-            try
-            {
-                var data = await _rest.GetEventLiveDataAsync(evt, "15min");
-                var details = data["live_data"]?["details"];
-                if (details == null) continue;
-                // The spot price is typically in a field like "current_price" or "value"
-                var spot = details["current_price"]?.Value<double>()
-                        ?? details["value"]?.Value<double>()
-                        ?? details["spot"]?.Value<double>()
-                        ?? 0.0;
-                if (spot > 0)
-                    _spotPrices[coin] = spot;
-            }
-            catch { }
-        }
+        // Kalshi live_data.details.timeseries[] {t,v} is the CF 1s path.
+        // The old code looked for current_price/value/spot — those fields
+        // are not there, so BNB/ADA/NEAR/TON/BCH/ZEC/HYPE Δ was blank/wrong.
+        await FetchAllLiveSpotsAsync();
     }
 
     private async Task CheckForNewMarketsAsync()
@@ -659,7 +737,7 @@ public class MainForm : Form
                     var closeStr = m["close_time"]?.Value<string>() ?? "";
                     DateTime closeDt = DateTime.MinValue;
                     if (!string.IsNullOrEmpty(closeStr))
-                        closeDt = DateTime.Parse(closeStr.Replace("Z", ""));
+                        closeDt = LineMath.ParseUtc(closeStr);
 
                     return new { Coin = kvp.Key, Ticker = m["ticker"]?.Value<string>() ?? "?", CloseTime = closeDt };
                 }
@@ -677,6 +755,7 @@ public class MainForm : Form
                 _tickerToCoin[r.Ticker] = r.Coin;
                 if (r.CloseTime != DateTime.MinValue)
                     _coinCloseTimes[r.Coin] = r.CloseTime;
+                NoticeTicker(r.Coin, r.Ticker, r.CloseTime);
             }
 
             if (newTickers.Count > 0 && _wsClient?.IsConnected == true)
@@ -691,31 +770,16 @@ public class MainForm : Form
         finally { _isRefreshing = false; }
     }
 
-    private async Task RefreshMarketsWsFallbackAsync()
-    {
-        if (_isRefreshing) return;
-        _isRefreshing = true;
-        try
-        {
-            // Only refresh if WebSocket is disconnected
-            if (_wsClient?.IsConnected == true)
-            {
-                // Unhook REST fallback now that WS is back
-                _refreshTimer.Tick -= async (_, _) => await RefreshMarketsWsFallbackAsync();
-                return;
-            }
-            await RefreshMarketsAsync();
-        }
-        finally { _isRefreshing = false; }
-    }
-
     // ── Refresh ──
 
     private async Task RefreshAllAsync()
     {
-        await RefreshMarketsAsync();
-        await RefreshBalanceAsync();
-        await RefreshOrdersAsync();
+        // Independent requests — run them side by side instead of one after another
+        await Task.WhenAll(
+            RefreshMarketsAsync(),
+            RefreshBalanceAsync(),
+            RefreshOrdersAsync(),
+            RefreshPositionsGridAsync());
     }
 
     private async Task RefreshMarketsAsync()
@@ -741,7 +805,7 @@ public class MainForm : Form
                     DateTime closeDt = DateTime.MinValue;
                     if (!string.IsNullOrEmpty(closeStr))
                     {
-                        closeDt = DateTime.Parse(closeStr.Replace("Z", ""));
+                        closeDt = LineMath.ParseUtc(closeStr);
                         var remaining = (int)(closeDt - now).TotalSeconds;
                         timer = remaining < 0 ? "closed" : $"{remaining / 60}:{remaining % 60:D2}";
                     }
@@ -795,11 +859,13 @@ public class MainForm : Form
                     _coinStrikes[r.Coin] = r.Strike;
                 if (!string.IsNullOrEmpty(r.EventTicker))
                     _coinEventTickers[r.Coin] = r.EventTicker;
+                NoticeTicker(r.Coin, r.Ticker, r.CloseTime);
                 // Compute orderbook pressure: yes_bid vs yes_ask (ask = selling YES = buying NO)
                 var total = r.YesBidSize + r.YesAskSize;
                 if (total > 0)
                     _orderPressure[r.Coin] = r.YesBidSize / total;
             }
+            InvalidateLines(); // strikes / close times may have changed
 
             // Save current selection before modifying the grid
             string? selectedCoin = null;
@@ -813,8 +879,12 @@ public class MainForm : Form
             _grid.Rows.Clear();
             foreach (var r in rows)
             {
-                var idx = _grid.Rows.Add(r!.Ticker, r.UpPct, r.Coin, r.DownPct, FormatSpotDist(r.Coin), r.Volume);
+                var idx = _grid.Rows.Add(
+                    r!.Ticker, r.UpPct, r.Coin, r.DownPct,
+                    FormatSpotDist(r.Coin), FormatLastDist(r.Coin), FormatBps(r.Coin),
+                    FormatSide(r.Coin), FormatVsBtc(r.Coin), r.Volume);
                 ApplyRowColor(_grid.Rows[idx], r.UpPct);
+                ColorLineCells(_grid.Rows[idx], r.Coin);
             }
 
             // Restore selection to the same coin
@@ -838,6 +908,12 @@ public class MainForm : Form
             _grid.ResumeLayout();
 
             _lblStatus.Text = $"⏰ {DateTime.UtcNow:HH:mm:ss} UTC — {rows.Count} markets";
+
+            if (!_backfillStarted)
+            {
+                _backfillStarted = true;
+                _ = BackfillPatternsAsync();
+            }
 
             // Re-subscribe WebSocket with any new tickers
             if (newTickersForWs.Count > 0 && _wsClient?.IsConnected == true)
@@ -943,10 +1019,15 @@ public class MainForm : Form
 
     private void RenderPositionsGrid()
     {
+        // Runs every second: update cells in place, rebuild only when the row count changes
+        var positions = _cachedPositions;
+        var rebuild = _positionsGrid.Rows.Count != positions.Count;
         _positionsGrid.SuspendLayout();
-        _positionsGrid.Rows.Clear();
-        foreach (var (ticker, side, count, cost) in _cachedPositions)
+        if (rebuild)
+            _positionsGrid.Rows.Clear();
+        for (var i = 0; i < positions.Count; i++)
         {
+            var (ticker, side, count, cost) = positions[i];
             var entryPrice = count > 0 ? cost / count : 0;
             var currentPrice = _livePrices.TryGetValue(ticker, out var lp) ? lp : 0;
             double pnl = 0;
@@ -958,8 +1039,20 @@ public class MainForm : Form
                     pnl = ((1.0 - currentPrice) - entryPrice) * count;
             }
             var pnlStr = pnl != 0 ? $"{(pnl >= 0 ? "+" : "")}${pnl:F2}" : "—";
-            _positionsGrid.Rows.Add(
-                tickerToCoin(ticker), side, $"{count:F2}", $"${cost:F2}", $"${count * (side == "UP" ? currentPrice : 1 - currentPrice):F2}", pnlStr);
+            var values = new object[]
+            {
+                tickerToCoin(ticker), side, $"{count:F2}", $"${cost:F2}", $"${count * (side == "UP" ? currentPrice : 1 - currentPrice):F2}", pnlStr
+            };
+            if (rebuild)
+            {
+                _positionsGrid.Rows.Add(values);
+            }
+            else
+            {
+                var cells = _positionsGrid.Rows[i].Cells;
+                for (var c = 0; c < values.Length; c++)
+                    SetCell(cells[c], values[c]);
+            }
         }
         _positionsGrid.ResumeLayout();
     }
@@ -1331,17 +1424,9 @@ public class MainForm : Form
 
     private string FormatSpotDist(string coin)
     {
-        if (!_spotPrices.TryGetValue(coin, out var spot) ||
-            !_coinStrikes.TryGetValue(coin, out var strike) || strike == 0)
-            return "—";
-
-        var diff = spot - strike;
-        var sign = diff >= 0 ? "+" : "";
-        return diff switch
-        {
-            >= 1000 => $"{sign}${diff / 1000:F9}K",
-            _ => $"{sign}${diff:F9}"
-        };
+        // Δ LINE = expected 60s settle average − floor_strike (middle line).
+        var s = ComputeLine(coin);
+        return s == null ? "—" : LineMath.Money(s.LineDist, coin);
     }
 
     private static string FormatEdge(JToken? yesBid)

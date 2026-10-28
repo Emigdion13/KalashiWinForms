@@ -2,3 +2,7 @@ bin/
 obj/
 .env
 *.user
+coin_finishes.jsonl
+coin_finishes.jsonl.tmp
+coin_patterns.json
+coin_patterns.json.tmp

@@ -11,8 +11,11 @@ public class KalshiWebSocketClient : IDisposable
     private ClientWebSocket? _ws;
     private CancellationTokenSource? _cts;
     private int _nextId = 1;
-    private int _tickerSid;
-    private int _cfSid;
+    private volatile int _tickerSid;
+    private volatile int _cfSid;
+    // Events are raised on the context that called ConnectAsync (the UI thread),
+    // while JSON parsing happens on the thread pool.
+    private SynchronizationContext? _eventContext;
 
     public event Action<JObject>? TickerUpdated;
     public event Action<string, double>? SpotUpdated;
@@ -32,6 +35,7 @@ public class KalshiWebSocketClient : IDisposable
 
     public async Task ConnectAsync(IReadOnlyList<string> marketTickers)
     {
+        _eventContext = SynchronizationContext.Current;
         _cts = new CancellationTokenSource();
         _ws = new ClientWebSocket();
 
@@ -115,30 +119,40 @@ public class KalshiWebSocketClient : IDisposable
         await _ws.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, _cts?.Token ?? default);
     }
 
+    private void Raise(Action action)
+    {
+        var ctx = _eventContext;
+        if (ctx != null) ctx.Post(_ => action(), null);
+        else action();
+    }
+
     private async Task ReceiveLoopAsync(CancellationToken ct)
     {
         var buffer = new byte[8192];
-        var messageBuffer = new StringBuilder();
+        // Collect raw bytes so multi-byte UTF-8 chars split across frames decode correctly
+        using var messageBuffer = new MemoryStream();
+        Exception? lostReason = null;
 
         try
         {
             while (_ws?.State == WebSocketState.Open && !ct.IsCancellationRequested)
             {
-                var result = await _ws.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
+                var result = await _ws.ReceiveAsync(new ArraySegment<byte>(buffer), ct).ConfigureAwait(false);
 
                 if (result.MessageType == WebSocketMessageType.Close)
                 {
-                    LogMessage?.Invoke("WebSocket closed by server.");
+                    Raise(() => LogMessage?.Invoke("WebSocket closed by server."));
+                    lostReason = new WebSocketException("Closed by server");
                     break;
                 }
 
                 // Handle ping/pong at the control frame level — ClientWebSocket handles pong automatically
-                messageBuffer.Append(Encoding.UTF8.GetString(buffer, 0, result.Count));
+                messageBuffer.Write(buffer, 0, result.Count);
 
                 if (result.EndOfMessage)
                 {
-                    var msg = messageBuffer.ToString();
-                    messageBuffer.Clear();
+                    var msg = Encoding.UTF8.GetString(messageBuffer.GetBuffer(), 0, (int)messageBuffer.Length);
+                    messageBuffer.SetLength(0);
 
                     try
                     {
@@ -147,7 +161,7 @@ public class KalshiWebSocketClient : IDisposable
 
                         if (type == "ticker")
                         {
-                            TickerUpdated?.Invoke(json);
+                            Raise(() => TickerUpdated?.Invoke(json));
                         }
                         else if (type == "cfbenchmarks_value")
                         {
@@ -160,7 +174,7 @@ public class KalshiWebSocketClient : IDisposable
                                     var inner = JObject.Parse(dataStr);
                                     var value = inner["value"]?.Value<double>();
                                     if (value.HasValue)
-                                        SpotUpdated?.Invoke(indexId, value.Value);
+                                        Raise(() => SpotUpdated?.Invoke(indexId, value.Value));
                                 }
                                 catch { }
                             }
@@ -170,7 +184,7 @@ public class KalshiWebSocketClient : IDisposable
                             var code = json["msg"]?["code"]?.Value<int>() ?? 0;
                             var errMsg = json["msg"]?["msg"]?.Value<string>() ?? "";
                             var errId = json["id"]?.Value<int>() ?? 0;
-                            LogMessage?.Invoke($"WS Error #{code}: {errMsg} (cmd id={errId})");
+                            Raise(() => LogMessage?.Invoke($"WS Error #{code}: {errMsg} (cmd id={errId})"));
                         }
                         else if (type == "subscribed")
                         {
@@ -178,12 +192,12 @@ public class KalshiWebSocketClient : IDisposable
                             var sid = json["msg"]?["sid"]?.Value<int>() ?? 0;
                             if (channel == "ticker") _tickerSid = sid;
                             else if (channel == "cfbenchmarks_value") _cfSid = sid;
-                            LogMessage?.Invoke($"Subscribed to {channel} (sid={sid})");
+                            Raise(() => LogMessage?.Invoke($"Subscribed to {channel} (sid={sid})"));
                         }
                         else
                         {
                             // Log other messages for debugging
-                            LogMessage?.Invoke($"WS: {msg}");
+                            Raise(() => LogMessage?.Invoke($"WS: {msg}"));
                         }
                     }
                     catch
@@ -194,15 +208,18 @@ public class KalshiWebSocketClient : IDisposable
             }
         }
         catch (OperationCanceledException) { }
-        catch (WebSocketException ex)
-        {
-            LogMessage?.Invoke($"WebSocket error: {ex.Message}");
-            ConnectionLost?.Invoke(ex);
-        }
         catch (Exception ex)
         {
-            LogMessage?.Invoke($"Receive error: {ex.Message}");
-            ConnectionLost?.Invoke(ex);
+            var label = ex is WebSocketException ? "WebSocket error" : "Receive error";
+            Raise(() => LogMessage?.Invoke($"{label}: {ex.Message}"));
+            lostReason = ex;
+        }
+
+        // Any exit we didn't ask for (server close, network drop) must trigger a reconnect
+        if (!ct.IsCancellationRequested)
+        {
+            var reason = lostReason ?? new WebSocketException("Connection ended");
+            Raise(() => ConnectionLost?.Invoke(reason));
         }
     }
 
